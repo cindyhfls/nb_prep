@@ -2,8 +2,8 @@ import os
 import sys
 import json
 from glob import glob
-from process.fmriprep import run_fmriprep
-from process.regression import regression_workflow
+from nb_prep.fmriprep import run_fmriprep
+from nb_prep.regression import regression_workflow
 
 
 def rename_func(fn):

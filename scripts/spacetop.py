@@ -1,8 +1,8 @@
 import os
 import sys
 from glob import glob
-from process.main import PreprocessWorkflow
-from process.fmriprep import fmriprep_success
+from nb_prep.main import PreprocessWorkflow
+from nb_prep.fmriprep import fmriprep_success
 
 
 def rename_func(fn):

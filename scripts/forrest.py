@@ -1,7 +1,7 @@
 import os
 import sys
 from glob import glob
-from process.main import PreprocessWorkflow
+from nb_prep.main import PreprocessWorkflow
 
 
 def rename_func(fn):

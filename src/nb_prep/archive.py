@@ -2,7 +2,7 @@ import os
 from glob import glob
 from shutil import copy2
 
-from process.compression import copy_files_to_lzma_tar
+from .compression import copy_files_to_lzma_tar
 
 
 def archive_subject_work_dir(sid, labels, wf_root, out_dir):

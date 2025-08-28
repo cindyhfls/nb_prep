@@ -8,7 +8,6 @@ import tarfile
 from glob import glob
 from joblib import Parallel, delayed
 
-
 default_columns = \
     ['a_comp_cor_%02d' % (_, ) for _ in range(6)] + \
     ['framewise_displacement'] + \

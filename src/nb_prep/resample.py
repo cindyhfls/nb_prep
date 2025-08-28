@@ -5,7 +5,6 @@ import warnings
 import h5py
 from nitransforms.io.itk import ITKCompositeH5
 
-
 def interpolate(img, ijk, fill=np.nan, kwargs={'order': 1}):
     shape = img.shape
     ijk = np.moveaxis(ijk, -1, 0)

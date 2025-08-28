@@ -1,7 +1,7 @@
 import os
 import sys
 from glob import glob
-from process.fmriprep import run_fmriprep
+from nb_prep.fmriprep import run_fmriprep
 
 
 if __name__ == '__main__':
