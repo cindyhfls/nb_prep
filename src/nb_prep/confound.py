@@ -74,11 +74,10 @@ def compute_regressors(in_fn,conf,confounds_dir,columns=None):
         ['rot_x', 'rot_y', 'rot_z'] + \
         ['trans_x_derivative1', 'trans_y_derivative1', 'trans_z_derivative1'] + \
         ['rot_x_derivative1', 'rot_y_derivative1', 'rot_z_derivative1']
-    regressors = conf[columns]
+    regressors = np.nan_to_num(conf[columns])
     regressors = np.hstack([
         regressors,
         legendre_regressors(polyord=2, n_tp=regressors.shape[0])])
-    regressors = np.nan_to_num(np.stack(regressors, axis=1))
     np.save(out_fn, regressors)
 
 def save_basic_confounds(in_fn,conf,confounds_dir):
