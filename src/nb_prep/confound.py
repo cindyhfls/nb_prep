@@ -59,6 +59,15 @@ def compute_temporal_mask(in_fn,conf,confounds_dir,fd_threshold=None,std_dvars_t
             if key.startswith('motion_outlier'):
                 mask = np.logical_or(mask, conf[key].values)
         mask = np.logical_not(mask)
+        mask_descriptions = {
+            "description":"legacy mask with fmriprep default motion outlier only (no non-steady-state outlier)",
+            "fd_threshold":"see fmriprep",
+            "std_dvars_threshold": "see fmriprep",
+            "non_steady_state_counter": "not used",
+            "contiguous_frames":1
+        }
+        with open(out_fn.replace(".npy",".json"), "w") as f:
+            json.dump(mask_descriptions, f, indent=4)
     np.save(out_fn, mask)
 
 def compute_regressors(in_fn,conf,confounds_dir,columns=None):
