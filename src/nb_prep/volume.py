@@ -1,6 +1,7 @@
 import os
 import numpy as np
 import nibabel as nib
+from nilearn import image
 
 __all__ = ['canonical_volume_coords', 'mni_affine', 'mni_coords',
     'aseg_mapping', 'extract_data_in_mni', 'resample_mni_to_resolution']
@@ -87,8 +88,8 @@ def resample_mni_to_resolution(data, mm=1):
 
 
 aseg_mapping = {
-    3:  'l-cerebrum',
-    42: 'r-cerebrum',
+    3:  'l-cerebralCtx',
+    42: 'r-cerebralCtx',
 
     8:  'l-cerebellum',
     47: 'r-cerebellum',
@@ -112,17 +113,48 @@ aseg_mapping = {
     60: 'r-ventral-diencephalon',
 }
 
-
-def extract_data_in_mni(data, mm=2, cortex=True):
+def extract_data_in_mni(data, mm=2, cortex=True,atlas_names=['aseg']):
     resampled, affine = resample_mni_to_resolution(data, mm=mm)
-    atlas = nib.load(os.path.join(DIR, 'data',
-        f'tpl-MNI152NLin2009cAsym_res-{mm:02d}_atlas-aseg_dseg.nii.gz'))
-    atlas = np.asanyarray(atlas.dataobj)
     output = {}
-    for idx, name in aseg_mapping.items():
-        if idx in [3, 42] and not cortex:
-            continue
-        mask = (atlas == idx)
-        roi = resampled[mask]
-        output[name] = roi
+    for atlas_name in atlas_names:
+        if atlas_name == 'aseg':
+            atlas = nib.load(os.path.join(DIR, 'atlas',
+                f'tpl-MNI152NLin2009cAsym_res-{mm:02d}_atlas-aseg_dseg.nii.gz'))
+            atlas = np.asanyarray(atlas.dataobj)
+            for idx, name in aseg_mapping.items():
+                if idx in [3, 42] and not cortex:
+                    continue
+                mask = (atlas == idx)
+                roi = resampled[mask]
+                output[name] = roi.T
+        elif atlas_name == 'Tian':
+            atlas = nib.load(os.path.join(DIR, 'atlas','Tian_Subcortex_S1_3T_2009cAsym.nii.gz'))
+            atlas = np.asanyarray(atlas.dataobj)
+            mask = (atlas!=0)
+            output['Tian_Subcortex'] = resampled[mask].T # we don't need to save separate data for each scale, we will just use a separate mapping later to get it
+        else:
+            raise ValueError(f'Only support these atlases in MNI152NLin2009cAsym space : "aseg" or "Tian"')
     return output
+
+def resample_img_to_resolution_with_nilearn(data, affine=None, mm=2,interpolation = 'linear',return_img = True):
+    img = nib.Nifti1Image(data, affine=affine)
+    target_affine = np.diag((mm, mm, mm)) # voxel size, the rest is automatically calculated
+    new_img = image.resample_img(img, target_affine=target_affine,interpolation=interpolation,force_resample=True,copy_header=True)
+    del img
+    if return_img:
+        return new_img
+    else:
+        data = new_img.get_fdata()
+        affine = new_img.affine
+        return data, affine
+
+# def resample_img_to_template(data,affine=None,img_template=None,interpolation='linear',return_img=True):
+#     # it seems that this is a dangerous function because it assumed the images are in the same space just different voxel dimensions or grid alignment
+#     img = nib.Nifti1Image(data, affine=affine)
+#     new_img = image.resample_img(img,target_affine=img_template.affine,target_shape=img_template.shape[:3],interpolation=interpolation,force_resample=True)
+#     if return_img:
+#         return new_img
+#     else:
+#         data = new_img.get_fdata()
+#         affine = new_img.affine
+#         return data, affine

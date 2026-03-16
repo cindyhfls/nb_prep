@@ -6,13 +6,21 @@ import scipy.sparse as sparse
 import nibabel as nib
 import nitransforms as nt
 from joblib import Parallel, delayed
-from functools import partial
 import neuroboros as nb
+import gc
+from nilearn import image
 
 from .surface import Hemisphere
-from .volume import mni_affine, mni_coords, find_truncation_boundaries, canonical_volume_coords, aseg_mapping, extract_data_in_mni
+from .volume import mni_affine, mni_coords, find_truncation_boundaries, canonical_volume_coords, aseg_mapping, extract_data_in_mni,resample_mni_to_resolution,resample_img_to_resolution_with_nilearn
 from .resample import parse_combined_hdf5, compute_warp, parse_warp_image, interpolate
 
+# Things to keep in mind for future references:
+# 1. Add resample_workflow input atlas_names to "" or [] to skip volume resampling (default is using freesurfer aseg)
+# 2. The volume resampling of cerebral cortices was hardcoded to be skipped now and renamed to "l-cerebralCtx" and "r-cerebralCtx" to be more explicit (but I did not change the "l-cerebrum" and "r-cerebrum" for surface resampling)
+# 3. Hard coded to only used 1step_linear_resample for volume data instead of 1step_fmriprep resample because we don't want multiple copies of the same data! But we can make that a choice later.
+# 4. Hard coded to only take mni-2mm because we don't want repeated data, can make that an option later.
+# 5. Also skipped the save average volume step
+# 6. Please ignore the nilearn part, I think this is only applied at the level of resampling across different mni resolutions, but I believe what Feilong meant was more of the registration from BOLD space to MNI
 
 def _average_function(X, xform):
     return X.mean(axis=1) @ xform
@@ -108,7 +116,7 @@ class Subject(object):
             new_img = nib.Nifti1Image(data, affine, header=canonical.header)
             os.makedirs(os.path.dirname(out_fn), exist_ok=True)
             new_img.to_filename(out_fn)
-
+   
 
 class FunctionalRun(object):
     # Temporarily removed the prefiltered data from Interpolator
@@ -160,13 +168,13 @@ class FunctionalRun(object):
                     print(self.wf_dir)
                     print(warp_fns)
                     raise Exception
-
-        self.nii_data, self.nii_affines = [], []
-        for i, nii_fn in enumerate(nii_fns):
-            nii = nib.load(nii_fn)
-            data = np.asarray(nii.dataobj)
-            self.nii_affines.append(nii.affine)
-            self.nii_data.append(data)
+        self.nii_fns = nii_fns.copy()
+        # self.nii_data, self.nii_affines = [], []
+        # for nii_fn in nii_fns:
+        #     nii = nib.load(nii_fn)
+        #     self.nii_affines.append(nii.affine)
+        #     data = np.asarray(nii.dataobj)
+        #     self.nii_data.append(data)
 
         if len(warp_fns):
             self.warp_data, self.warp_affines = [], []
@@ -197,14 +205,14 @@ class FunctionalRun(object):
         if not self.has_data:
             self.load_data()
 
-        data = np.asarray(self.extra[key].dataobj)
-        affine = self.extra[key].affine.copy()
+        # data = np.asarray(self.extra[key].dataobj)
+        # affine = self.extra[key].affine.copy()
+        nii_fn = self.extra[key].nii_fn.copy()
         coords = coords @ self.ref_to_t1.T
 
         results = interpolate_original_space_single_volume(
-            data, affine, coords, None, None, None, interp_kwargs, fill, callback)
+            nii_fn, coords, None, None, None, interp_kwargs, fill, callback)
         return results
-
 
     def interpolate(
             self, coords, onestep=True, interp_kwargs={'order': 1}, fill=np.nan, callback=None,
@@ -214,7 +222,8 @@ class FunctionalRun(object):
 
         if onestep:
             interps = interpolate_original_space(
-                self.nii_data, self.nii_affines, coords,
+                self.nii_fns,coords,
+                # self.nii_data, self.nii_affines, coords,
                 self.ref_to_t1, self.hmc, self.warp_data, self.warp_affines,
                 interp_kwargs, fill, callback, combine_funcs, n_jobs=n_jobs)
             return interps
@@ -246,12 +255,21 @@ def _combine_interpolation_results(interps, n_funcs, combine_funcs, stack=True):
                 output[key].append(interp[key])
         for key in keys:
             output[key] = func(output[key], axis=0)
+    elif isinstance(interps[0],tuple):
+        data_list = [interp[0] for interp in interps]
+        combined_data = func(data_list, axis=0)
+        all_affines = [interp[1] for interp in interps]
+        if not all(np.array_equal(all_affines[0], aff) for aff in all_affines[1:]):
+            raise ValueError("Affine matrices are not identical across interpolation results")
+        affine = all_affines[0]
+        output = (combined_data, affine)
+    elif isinstance(interps[0], nib.nifti1.Nifti1Image):
+        output = image.concat_imgs(interps)
     else:
-        raise ValueError
+        raise ValueError(f'Output is {type(interps[0])}')
     if combine_funcs is not None:
         output = combine_funcs(output)
     return output
-
 
 def run_callback(interp, callback):
     if callback is None:
@@ -263,9 +281,11 @@ def run_callback(interp, callback):
         output = callback(interp)
         return output
 
-
 def interpolate_original_space_single_volume(
-        data, affine, coords, warp, warp_affine, hmc, interp_kwargs, fill, callback):
+        nii_fn, coords, warp, warp_affine, hmc, interp_kwargs, fill, callback):
+    nii = nib.load(nii_fn)
+    data = np.asanyarray(nii.dataobj).astype(np.float64, copy=False)
+    affine = nii.affine
     cc = coords.copy()
     if warp is not None:
         diff = compute_warp(cc, warp.astype(np.float64), warp_affine)
@@ -274,10 +294,9 @@ def interpolate_original_space_single_volume(
         cc = cc @ np.linalg.inv(affine).T
     else:
         cc = cc @ (hmc.T @ np.linalg.inv(affine).T)
-    interp = interpolate(data.astype(np.float64), cc, fill=fill, kwargs=interp_kwargs)
+    interp = interpolate(data, cc, fill=fill, kwargs=interp_kwargs)
     interp = run_callback(interp, callback)
     return interp
-
 
 def _run_jobs_and_combine(jobs, callback, combine_funcs, n_jobs):
     n_funcs = len(callback) if isinstance(callback, (list, tuple)) else 0
@@ -294,29 +313,27 @@ def _run_jobs_and_combine(jobs, callback, combine_funcs, n_jobs):
     return results
 
 
-def interpolate_original_space(nii_data, nii_affines, coords,
+def interpolate_original_space(nii_fns, coords,
         ref_to_t1, hmc, warp_data=None, warp_affines=None,
         interp_kwargs={'order': 1}, fill=np.nan, callback=None, combine_funcs=None, n_jobs=1):
     coords = coords @ ref_to_t1.T
     jobs = []
-    for i, (data, affine) in enumerate(zip(nii_data, nii_affines)):
+    for i, nii_fn in enumerate(nii_fns):
         if warp_data is None:
             warp, warp_affine = None, None
         else:
             warp, warp_affine = warp_data[i], warp_affines[i]
         job = delayed(interpolate_original_space_single_volume)(
-            data, affine, coords, warp, warp_affine, (None if hmc is None else hmc[i]),
+            nii_fn, coords, warp, warp_affine, (None if hmc is None else hmc[i]),
             interp_kwargs, fill, callback)
         jobs.append(job)
     results = _run_jobs_and_combine(jobs, callback, combine_funcs, n_jobs)
     return results
 
-
 def interpolate_t1_space_single_volume(data, cc, fill, interp_kwargs, callback):
     interp = interpolate(data.astype(np.float64), cc, fill=fill, kwargs=interp_kwargs)
     interp = run_callback(interp, callback)
     return interp
-
 
 def interpolate_t1_space(nii_t1, nii_t1_affine, coords,
         interp_kwargs={'order': 1}, fill=np.nan, callback=None, combine_funcs=None, n_jobs=1):
@@ -328,9 +345,8 @@ def interpolate_t1_space(nii_t1, nii_t1_affine, coords,
     results = _run_jobs_and_combine(jobs, callback, combine_funcs, n_jobs)
     return results
 
-
 def workflow_single_run(label, sid, wf_root, out_dir, combinations, subj,
-        tmpl_dir=os.path.expanduser('~/surface_template/lab/final'), n_jobs=1):
+        tmpl_dir=os.path.expanduser('~/surface_template/lab/final'), n_jobs=1,atlas_names=['aseg'],save_mni_nifti=False):
     multiecho = ('_echo-' in label)
     label2 = label.replace('-', '_')
     wf_dir = (f'{wf_root}/func_preproc_{label2}_wf')
@@ -386,40 +402,71 @@ def workflow_single_run(label, sid, wf_root, out_dir, combinations, subj,
                 coords, onestep, interp_kwargs={'order': 1}, fill=np.nan,
                 callback=funcs, combine_funcs=combine_funcs, n_jobs=n_jobs)
             for resampled, out_fn in zip(output, out_fns):
+                os.makedirs(os.path.dirname(out_fn),exist_ok=True)
                 np.save(out_fn, resampled)
                 print(resampled.shape, resampled.dtype, out_fn)
-
+                del resampled
+                gc.collect()
+            
             if func_run.multiecho and onestep:
                 for extra_key in func_run.extra:
                     output = func_run.interpolate_extra(extra_key, coords, interp_kwargs={'order': 1}, fill=np.nan, callback=funcs)
                     for resampled, out_fn0 in zip(output, out_fns):
                         out_fn = out_fn0[:-4] + f'_{extra_key}.npy'
+                        os.makedirs(os.path.dirname(out_fn),exist_ok=True)
                         np.save(out_fn, resampled)
                         print(resampled.shape, resampled.dtype, out_fn)
+                        del resampled,output
+                        gc.collect()
+
+    # Begin volume resample
+    rois = []
+    for atlas_name in atlas_names:
+        if atlas_name == "aseg":
+            rois.extend(list(aseg_mapping.values()))
+        elif atlas_name=='Tian':
+            rois.append("Tian_Subcortex")
+        else:
+            raise ValueError(f'Only support these atlases in MNI152NLin2009cAsym space : "aseg" or "Tian"')
 
     todo = []
     funcs = []
     combine_funcs = []
     tag = '1step_linear_overlap'
-    for mm in [2, 3, 4]:
+    for mm in [2]: # was [2, 3, 4]
         space = f'mni-{mm}mm'
-        rois = list(aseg_mapping.values())
         out_fns = [f'{out_dir}/{space}/{roi}/{tag}/sub-{sid}_{label}.npy' for roi in rois]
-        if all([os.path.exists(_) for _ in out_fns]):
-            continue
-        for out_fn in out_fns:
-            os.makedirs(os.path.dirname(out_fn), exist_ok=True)
-        callback = partial(extract_data_in_mni, mm=mm, cortex=True)
-        todo.append(mm)
-        funcs.append(callback)
-        combine_funcs.append(None)
-    out_fn = f'{out_dir}/mni-1mm/average-volume/{tag}/sub-{sid}_{label}.nii.gz'
-    if not os.path.exists(out_fn):
-        todo.append(1)
-        funcs.append(lambda x: x)
-        combine_funcs.append(lambda x: np.sum(x, axis=0, keepdims=True))
-        os.makedirs(os.path.dirname(out_fn), exist_ok=True)
-
+        # original code, resample with Feilong's custom block average (linear interpolation) and get ROI voxels in numpy arrays
+        if not (out_fns and all([os.path.exists(_) for _ in out_fns])): # it doesn't take that much more time if we have to get one ROI because the most computational heavy part is to resample to MNI
+            for out_fn in out_fns:
+                os.makedirs(os.path.dirname(out_fn), exist_ok=True)
+            callback = partial(extract_data_in_mni, mm=mm, cortex=False,atlas_names=atlas_names)
+            todo.append(mm)
+            funcs.append(callback)
+            combine_funcs.append(None)
+        # Saving the nifti files
+        if save_mni_nifti:# just for testing's sake we are doing both Feilong's method and nilearn
+            out_fn = f'{out_dir}/{space}/all-volumes/{tag}/sub-{sid}_{label}_space-MNI152NLin2009cAsym_res-{mm:02d}.nii.gz'
+            if not os.path.exists(out_fn):
+                os.makedirs(os.path.dirname(out_fn), exist_ok=True)
+                todo.append(mm)
+                callback = partial(resample_mni_to_resolution, mm=mm)
+                funcs.append(callback)
+                combine_funcs.append(None)
+            out_fn = f'{out_dir}/{space}/all-volumes/1step_linear_nilearn/sub-{sid}_{label}_space-MNI152NLin2009cAsym_res-{mm:02d}.nii.gz'
+            if not os.path.exists(out_fn):   
+                os.makedirs(os.path.dirname(out_fn), exist_ok=True)
+                todo.append(mm)
+                callback = partial(resample_img_to_resolution_with_nilearn,affine=mni_affine, mm=2,interpolation = 'linear',return_img = True)
+                funcs.append(callback)
+                combine_funcs.append(None)
+            
+    # out_fn = f'{out_dir}/mni-1mm/average-volume/{tag}/sub-{sid}_{label}.nii.gz'
+    # if not os.path.exists(out_fn):
+    #     todo.append(1)
+    #     funcs.append(lambda x: x)
+    #     combine_funcs.append(lambda x: np.sum(x, axis=0, keepdims=True))
+    #     os.makedirs(os.path.dirname(out_fn), exist_ok=True)
     if todo:
         coords = subj.get_volume_coords(use_mni=True)
         output = func_run.interpolate(
@@ -431,12 +478,27 @@ def workflow_single_run(label, sid, wf_root, out_dir, combinations, subj,
                 for roi, resampled in res.items():
                     out_fn = f'{out_dir}/{space}/{roi}/{tag}/sub-{sid}_{label}.npy'
                     np.save(out_fn, resampled)
-            else:
-                out_fn = f'{out_dir}/{space}/average-volume/{tag}/sub-{sid}_{label}.nii.gz'
-                img = nib.Nifti1Image(np.squeeze(res) / func_run.nt, affine=mni_affine)
-                img.to_filename(out_fn)
+                    del resampled
+            elif isinstance(res,tuple):
+                # downsampled with Feilong's custom block average
+                out_fn = f'{out_dir}/{space}/all-volumes/{tag}/sub-{sid}_{label}_space-MNI152NLin2009cAsym_res-{mm:02d}.nii.gz'
+                img = nib.Nifti1Image(res[0].transpose(1, 2, 3, 0), res[1]) # res tuple output from resample_mni_to_resolution (data,affine)
+                img.to_filename(out_fn) # Feilong had time as first dimension but nifti image wants time as last dimension!
+                del img
+            else: # output is nifti image object
+                try:
+                    # downsampled with nilearn "nb_prep.volume.resample_img_to_resolution_with_nilearn"
+                    out_fn = f'{out_dir}/{space}/all-volumes/1step_linear_nilearn/sub-{sid}_{label}_space-MNI152NLin2009cAsym_res-{mm:02d}.nii.gz'
+                    res.to_filename(out_fn)
+                except Exception as e:
+                    print(f"nilearn resampling failed: {e}")
+            del res
+            gc.collect()
+                # out_fn = f'{out_dir}/{space}/average-volume/{tag}/sub-{sid}_{label}.nii.gz'
+                # img = nib.Nifti1Image(np.squeeze(res) / func_run.nt, affine=mni_affine) # this is kind of dangerous because the mni_affine was a fixed value and previously Feilong only called it on the 1mm but if we accidentally called other resolution then it will give the wrong image
+                # img.to_filename(out_fn)
 
-        if func_run.multiecho:
+        if func_run.multiecho: # I did not change the multiecho part so it might be outdated
             funcs = [func for func, mm in zip(funcs, todo) if mm != 1]
             todo = [_ for _ in todo if _ != 1]
             print(len(funcs), todo)
@@ -448,56 +510,48 @@ def workflow_single_run(label, sid, wf_root, out_dir, combinations, subj,
                         for roi, resampled in res.items():
                             out_fn = f'{out_dir}/{space}/{roi}/{tag}/sub-{sid}_{label}_{extra_key}.npy'
                             np.save(out_fn, resampled)
-
-    tag = '1step_linear_overlap'
-    space = 'canonical'
-    out_fn = f'{out_dir}/{space}/average-volume/{tag}/sub-{sid}_{label}.nii.gz'
-    if not os.path.exists(out_fn):
-        os.makedirs(os.path.dirname(out_fn), exist_ok=True)
-        coords = subj.get_volume_coords(use_mni=False)
-        output = func_run.interpolate(
-            coords, True, interp_kwargs={'order': 1}, fill=np.nan, callback=[lambda x: x],
-            combine_funcs=[lambda x: np.sum(x, axis=0, keepdims=True)], n_jobs=n_jobs)
-        img = nib.Nifti1Image(np.squeeze(output[0]) / func_run.nt, affine=subj.canonical_affine)
-        img.to_filename(out_fn)
-
-    tag = '1step_fmriprep_overlap'
-    for mm in [2, 3, 4]:
-        space = f'mni-{mm}mm'
-        rois = list(aseg_mapping.values())
-        out_fns = [f'{out_dir}/{space}/{roi}/{tag}/sub-{sid}_{label}.npy' for roi in rois]
-        if all([os.path.exists(_) for _ in out_fns]):
-            continue
-        for out_fn in out_fns:
+                            del resampled
+                            gc.collect()
+    try:
+        tag = '1step_fmriprep_overlap'
+        for mm in [2]:
+            space = f'mni-{mm}mm'
+            out_fn = f'{out_dir}/{space}/all-volumes/{tag}/sub-{sid}_{label}_space-MNI152NLin2009cAsym_res-{mm:02d}.nii.gz'
             os.makedirs(os.path.dirname(out_fn), exist_ok=True)
-
-        in_fns = sorted(glob(os.path.join(
-            wf_dir, 'bold_std_trans_wf', '_std_target_MNI152NLin2009cAsym.res1',
-            'bold_to_std_transform', 'vol*_xform-*.nii.gz')))
-        if len(in_fns) == 0:
-            continue
-        output = []
-        for in_fn in in_fns:
-            d = np.asanyarray(nib.load(in_fn).dataobj)
-            output.append(extract_data_in_mni(d, mm=mm, cortex=True))
-        output = _combine_interpolation_results(output, 0, None)
-
-        for roi, resampled in output.items():
-            out_fn = f'{out_dir}/{space}/{roi}/{tag}/sub-{sid}_{label}.npy'
-            np.save(out_fn, resampled)
-
-    out_fn = f'{out_dir}/mni-1mm/average-volume/{tag}/sub-{sid}_{label}.nii.gz'
-    if not os.path.exists(out_fn):
-        os.makedirs(os.path.dirname(out_fn), exist_ok=True)
-        in_fns = sorted(glob(os.path.join(
-            wf_dir, 'bold_std_trans_wf', '_std_target_MNI152NLin2009cAsym.res1',
-            'bold_to_std_transform', 'vol*_xform-*.nii.gz')))
-        if len(in_fns) == 0:
-            return
-        res = dc_sum(in_fns)
-        img = nib.Nifti1Image(res / len(in_fns), affine=mni_affine)
-        img.to_filename(out_fn)
-
+            in_fns = sorted(glob(os.path.join(
+                wf_dir, 'bold_std_trans_wf', '_std_target_MNI152NLin2009cAsym.res1',
+                'bold_to_std_transform', 'vol*_xform-*.nii.gz')))
+            if len(in_fns) == 0:
+                continue
+            output = []
+            for in_fn in in_fns:
+                new_img = image.resample_img(in_fn,target_affine = np.diag((mm, mm, mm)),force_resample=True)
+                output.append(new_img)
+            new_img = image.concat_imgs(output)
+            new_img.to_filename(out_fn)
+            del output
+            gc.collect()
+    except Exception as e:
+        print(f"fmriprep resampling failed: {e}")
+    
+    try:
+        mm = 2
+        space = f'canonical-{mm}mm'
+        out_fn = f'{out_dir}/{space}/all-volumes/1step_linear_nilearn/sub-{sid}_{label}_space-canonical.nii.gz'
+        if not os.path.exists(out_fn):
+            os.makedirs(os.path.dirname(out_fn), exist_ok=True)
+            coords = subj.get_volume_coords(use_mni=False)
+            callback = partial(resample_img_to_resolution_with_nilearn,affine=subj.canonical_affine, mm=mm,interpolation = 'linear',return_img = True)
+            funcs = [callback]
+            output = func_run.interpolate(
+                coords, True, interp_kwargs={'order': 1}, fill=np.nan, callback=funcs,
+                combine_funcs= [None], n_jobs=n_jobs)
+            img = output[0]
+            img.to_filename(out_fn)
+            del img,output
+            gc.collect()
+    except Exception as e:
+        print(f"resample to canonical space failed: {e}")
 
 def dc_sum(in_fns):
     if len(in_fns) in [1, 2]:
@@ -519,6 +573,8 @@ def resample_workflow(
         ],
         filter_=None,
         n_jobs=1,
+        atlas_names=['aseg'],
+        save_mni_nifti=False
     ):
 
     raw_bolds = sorted(glob(f'{bids_dir}/sub-{sid}/ses-*/func/*_bold.nii.gz')) + \
@@ -535,6 +591,9 @@ def resample_workflow(
         b = {'1step': True, '2step': False}[b]
         new_combinations.append([a, b, c, d])
     combinations = new_combinations
+
+    # mni_hdf5 = os.path.join(wf_root, '/anat/*T1w_to-MNI152NLin2009cAsym_mode-image_xfm.h5.h5')
+
 
     mni_hdf5 = os.path.join(wf_root, 'anat_preproc_wf', 'anat_norm_wf', '_template_MNI152NLin2009cAsym',
                             'registration', 'ants_t1_to_mniComposite.h5')
@@ -557,4 +616,4 @@ def resample_workflow(
                 subj.hemispheres[lr].native[f'to_{space}_{resample}'] = sparse.load_npz(xform_fn)
 
     for label in labels:
-        workflow_single_run(label, sid, wf_root, out_dir, combinations, subj, n_jobs=n_jobs)
+        workflow_single_run(label, sid, wf_root, out_dir, combinations, subj, n_jobs=n_jobs,atlas_names=atlas_names,save_mni_nifti=save_mni_nifti,fmriprep_legacy=True)

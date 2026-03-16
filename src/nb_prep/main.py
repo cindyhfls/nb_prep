@@ -30,7 +30,9 @@ class PreprocessWorkflow(object):
         self.config = config
         sid = self.config['sid']
         self.sid = sid
-
+        if config.get('atlas') is None:
+            config['atlas'] = 'aseg'
+        
         for key in ['fmriprep_work', 'fmriprep_out', 'output_root']:
             os.makedirs(self.config[key], exist_ok=True)
 
@@ -183,7 +185,7 @@ class PreprocessWorkflow(object):
         resample_workflow(
             sid=self.sid, bids_dir=self.config['bids_dir'],
             fs_dir=self.freesurfer_out, wf_root=self.work_out, out_dir=self.resample_dir, xform_dir=self.xform_dir,
-            n_jobs=self.config['n_procs'], combinations=self.config['combinations'], filter_=filter_)
+            n_jobs=self.config['n_procs'], combinations=self.config['combinations'], filter_=filter_,atlas=self.config.get('atlas'),save_mni_nifti = self.config.get('save_mni_nifti'))
         return True, ''
 
     def _run_confound(self, filter_):

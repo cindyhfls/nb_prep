@@ -6,6 +6,9 @@ import h5py
 from nitransforms.io.itk import ITKCompositeH5
 
 def interpolate(img, ijk, fill=np.nan, kwargs={'order': 1}):
+    # ensure NumPy scalar for NEP 50 compatibility
+    fill = None if fill is None else np.asarray(fill, dtype=np.result_type(fill))
+    
     shape = img.shape
     ijk = np.moveaxis(ijk, -1, 0)
     if ijk.shape[0] == 4:
@@ -51,7 +54,7 @@ def interpolate(img, ijk, fill=np.nan, kwargs={'order': 1}):
 
 def compute_warp(xyz1, warp, affine, kwargs={'order': 1}):
     ijk1 = xyz1 @ np.linalg.inv(affine).T
-    diff = [interpolate(w.astype(np.float64), ijk1, fill=0., kwargs=kwargs)
+    diff = [interpolate(w.astype(np.float64), ijk1, fill=np.float64(0.0), kwargs=kwargs)
             for w in np.moveaxis(warp, -1, 0)]
     diff = np.stack(diff, axis=-1)
     return diff

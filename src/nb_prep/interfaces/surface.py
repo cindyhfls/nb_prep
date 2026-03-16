@@ -70,9 +70,12 @@ def reconstruct_fieldmap_ndarray(
 
 
 def get_source_fn(boldref_json):
-    with open(boldref_json) as f:
-        orig_fns = json.load(f)['RawSources']
-    assert len(orig_fns) == 1
+    try:
+        with open(boldref_json) as f:
+            orig_fns = json.load(f)['RawSources']
+    except Exception:
+        with open(boldref_json) as f:
+            orig_fns = json.load(f)['Sources']
     return orig_fns[0]
 
 

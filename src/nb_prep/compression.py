@@ -8,7 +8,6 @@ import numpy as np
 import nibabel as nib
 from datetime import datetime
 
-
 def prepare_files(inputs, exclude):
     if isinstance(inputs, str):
         inputs = [inputs]
