@@ -83,6 +83,10 @@ def compute_regressors(in_fn,conf,confounds_dir,columns=None):
         ['rot_x', 'rot_y', 'rot_z'] + \
         ['trans_x_derivative1', 'trans_y_derivative1', 'trans_z_derivative1'] + \
         ['rot_x_derivative1', 'rot_y_derivative1', 'rot_z_derivative1']
+    missing = [c for c in columns if c not in conf.columns]
+    if missing:
+        warnings.warn(f"Requested confound columns not found in file, skipping: {missing}", UserWarning)
+    columns = [c for c in columns if c in conf.columns]
     regressors = np.nan_to_num(conf[columns])
     regressors = np.hstack([
         regressors,
