@@ -415,7 +415,7 @@ def run_workflow(
     # ------------------------------------------------------------------ #
     if do_mni:
         print("MNI volume")
-        tag = "1step_linear_overlap" #tag = "1step_linear_overlap_blockavg"
+        tag = "1step_linear_overlap_blockavg" #tag = "1step_linear_overlap_blockavg"
         space = f"mni-{mni_mm}mm"
 
         nifti_out_fn = (
