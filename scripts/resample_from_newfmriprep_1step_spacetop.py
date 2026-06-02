@@ -24,7 +24,7 @@ dataset_workflow(
     bids_dir=bids_dir,
     n_jobs_subjects=1,
     run_filter=filter_,
-    spaces=[],mni_mm=2,atlas_names=['aseg'],
+    spaces=[],mni_mm=2,atlas_names=['aseg','Tian'],
     do_canonical=False)
 
 # if you want surface too, set spaces = ['onavg-ico32','onavg-ico64'] etc.
